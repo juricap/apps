@@ -1,0 +1,1041 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Timesheet App - Local Storage</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/feather-icons"></script>
+    <style>
+        .time-slot {
+            cursor: pointer;
+            transition: all 0.2s;
+            user-select: none;
+        }
+        .time-slot:hover {
+            filter: brightness(0.9);
+        }
+        .time-slot.selected {
+            filter: brightness(0.8);
+        }
+        .project-item {
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .project-item:hover {
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        // Local Storage Database Service
+        const databaseService = {
+            projects: [],
+            timeEntries: {},
+            
+            init() {
+                this.loadProjects();
+                this.loadTimeEntries();
+            },
+            
+            loadProjects() {
+                const stored = localStorage.getItem('timesheet_projects');
+                this.projects = stored ? JSON.parse(stored) : [];
+                // Ensure all projects have an active field (default to true)
+                this.projects = this.projects.map(p => ({
+                    active: true,
+                    ...p
+                }));
+            },
+            
+            loadTimeEntries() {
+                const stored = localStorage.getItem('timesheet_entries');
+                this.timeEntries = stored ? JSON.parse(stored) : {};
+            },
+            
+            saveProjects() {
+                localStorage.setItem('timesheet_projects', JSON.stringify(this.projects));
+            },
+            
+            saveTimeEntries() {
+                localStorage.setItem('timesheet_entries', JSON.stringify(this.timeEntries));
+            },
+            
+            getAllProjects() {
+                return this.projects;
+            },
+            
+            getActiveProjects() {
+                return this.projects.filter(p => p.active);
+            },
+            
+            createProject(project) {
+                const newProject = {
+                    id: Date.now().toString(),
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    active: true,
+                    ...project
+                };
+                this.projects.push(newProject);
+                this.saveProjects();
+                return newProject;
+            },
+            
+            updateProject(id, updates) {
+                const index = this.projects.findIndex(p => p.id === id);
+                if (index !== -1) {
+                    this.projects[index] = {
+                        ...this.projects[index],
+                        ...updates,
+                        updatedAt: new Date().toISOString()
+                    };
+                    this.saveProjects();
+                    return this.projects[index];
+                }
+                return null;
+            },
+            
+            deleteProject(id) {
+                this.projects = this.projects.filter(p => p.id !== id);
+                this.saveProjects();
+                
+                // Remove all time entries for this project
+                Object.keys(this.timeEntries).forEach(date => {
+                    Object.keys(this.timeEntries[date]).forEach(time => {
+                        if (this.timeEntries[date][time] === id) {
+                            delete this.timeEntries[date][time];
+                        }
+                    });
+                    if (Object.keys(this.timeEntries[date]).length === 0) {
+                        delete this.timeEntries[date];
+                    }
+                });
+                this.saveTimeEntries();
+            },
+            
+            getTimeEntriesForDate(date) {
+                return this.timeEntries[date] || {};
+            },
+            
+            setTimeEntry(date, time, projectId) {
+                if (!this.timeEntries[date]) {
+                    this.timeEntries[date] = {};
+                }
+                if (projectId) {
+                    this.timeEntries[date][time] = projectId;
+                } else {
+                    delete this.timeEntries[date][time];
+                    if (Object.keys(this.timeEntries[date]).length === 0) {
+                        delete this.timeEntries[date];
+                    }
+                }
+                this.saveTimeEntries();
+            },
+            
+            exportData() {
+                return {
+                    projects: this.projects,
+                    timeEntries: this.timeEntries,
+                    exportedAt: new Date().toISOString()
+                };
+            },
+            
+            importData(data, mode = 'merge') {
+                if (mode === 'overwrite') {
+                    this.projects = (data.projects || []).map(p => ({
+                        active: true,  // Default to active
+                        ...p          // But allow explicit active: false to override
+                    }));
+                    this.timeEntries = data.timeEntries || {};
+                } else {
+                    // Merge projects
+                    const projectMap = new Map(this.projects.map(p => [p.id, p]));
+                    (data.projects || []).forEach(project => {
+                        // Ensure imported projects default to active unless explicitly false
+                        const projectWithDefaults = {
+                            active: true,
+                            ...project
+                        };
+                        projectMap.set(project.id, projectWithDefaults);
+                    });
+                    this.projects = Array.from(projectMap.values());
+                    
+                    // Merge time entries
+                    Object.keys(data.timeEntries || {}).forEach(date => {
+                        if (!this.timeEntries[date]) {
+                            this.timeEntries[date] = {};
+                        }
+                        Object.assign(this.timeEntries[date], data.timeEntries[date]);
+                    });
+                }
+                
+                this.saveProjects();
+                this.saveTimeEntries();
+            }
+        };
+
+        // Initialize database
+        databaseService.init();
+
+        // Time slot generation
+        function generateTimeSlots() {
+            const slots = [];
+            for (let hour = 0; hour < 24; hour++) {
+                for (let minute = 0; minute < 60; minute += 15) {
+                    const h = hour.toString().padStart(2, '0');
+                    const m = minute.toString().padStart(2, '0');
+                    slots.push(`${h}:${m}`);
+                }
+            }
+            return slots;
+        }
+
+        const TIME_SLOTS = generateTimeSlots();
+
+        // Main App Component
+        function App() {
+            const [projects, setProjects] = useState([]);
+            const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+            const [selectedProject, setSelectedProject] = useState(null);
+            const [timeEntries, setTimeEntries] = useState({});
+            const [isZoomed, setIsZoomed] = useState(false);
+            const [isDragging, setIsDragging] = useState(false);
+            const [dragStart, setDragStart] = useState(null);
+            const [dragEnd, setDragEnd] = useState(null);
+            const [showImportModal, setShowImportModal] = useState(false);
+            const [viewMode, setViewMode] = useState('day'); // 'day' or 'month'
+            const [selectedDayInMonth, setSelectedDayInMonth] = useState(null);
+            const [exportModalData, setExportModalData] = useState(null);
+            const [copyFeedback, setCopyFeedback] = useState('');
+            const fileInputRef = useRef(null);
+
+            useEffect(() => {
+                loadData();
+            }, []);
+
+            useEffect(() => {
+                loadTimeEntries();
+            }, [selectedDate]);
+
+            const loadData = () => {
+                const allProjects = databaseService.getAllProjects();
+                setProjects(allProjects);
+                if (allProjects.length > 0 && !selectedProject) {
+                    const activeProjects = allProjects.filter(p => p.active);
+                    if (activeProjects.length > 0) {
+                        setSelectedProject(activeProjects[0].id);
+                    }
+                }
+            };
+
+            const loadTimeEntries = () => {
+                const entries = databaseService.getTimeEntriesForDate(selectedDate);
+                setTimeEntries(entries);
+            };
+
+            const handleCreateProject = () => {
+                const name = prompt('Enter project name:');
+                if (name) {
+                    const color = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
+                    const newProject = databaseService.createProject({ name, color });
+                    loadData();
+                    setSelectedProject(newProject.id);
+                }
+            };
+
+            const handleUpdateProject = (id, updates) => {
+                databaseService.updateProject(id, updates);
+                loadData();
+            };
+
+            const handleDeleteProject = (id) => {
+                if (confirm('Are you sure you want to delete this project? All associated time entries will be removed.')) {
+                    databaseService.deleteProject(id);
+                    loadData();
+                    if (selectedProject === id) {
+                        const activeProjects = databaseService.getActiveProjects();
+                        setSelectedProject(activeProjects.length > 0 ? activeProjects[0].id : null);
+                    }
+                }
+            };
+
+            const handleTimeSlotClick = (slot) => {
+                if (!selectedProject) return;
+                
+                const currentProject = timeEntries[slot];
+                if (currentProject === selectedProject) {
+                    databaseService.setTimeEntry(selectedDate, slot, null);
+                } else {
+                    databaseService.setTimeEntry(selectedDate, slot, selectedProject);
+                }
+                loadTimeEntries();
+            };
+
+            const handleMouseDown = (slot) => {
+                if (!selectedProject) return;
+                setIsDragging(true);
+                setDragStart(slot);
+                setDragEnd(slot);
+            };
+
+            const handleMouseEnter = (slot) => {
+                if (isDragging && dragStart) {
+                    setDragEnd(slot);
+                }
+            };
+
+            const handleMouseUp = () => {
+                if (isDragging && dragStart && dragEnd && selectedProject) {
+                    const startIndex = TIME_SLOTS.indexOf(dragStart);
+                    const endIndex = TIME_SLOTS.indexOf(dragEnd);
+                    const minIndex = Math.min(startIndex, endIndex);
+                    const maxIndex = Math.max(startIndex, endIndex);
+                    
+                    for (let i = minIndex; i <= maxIndex; i++) {
+                        databaseService.setTimeEntry(selectedDate, TIME_SLOTS[i], selectedProject);
+                    }
+                    loadTimeEntries();
+                }
+                
+                setIsDragging(false);
+                setDragStart(null);
+                setDragEnd(null);
+            };
+
+            const handleDateChange = (days) => {
+                const date = new Date(selectedDate);
+                date.setDate(date.getDate() + days);
+                setSelectedDate(date.toISOString().split('T')[0]);
+            };
+
+            const handleExport = () => {
+                const data = databaseService.exportData();
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `timesheet-export-${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const handleImport = (mode) => {
+                const file = fileInputRef.current.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        databaseService.importData(data, mode);
+                        loadData();
+                        loadTimeEntries();
+                        setShowImportModal(false);
+                        alert('Import successful!');
+                    } catch (error) {
+                        alert('Import failed: ' + error.message);
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const getProjectColor = (projectId) => {
+                const project = projects.find(p => p.id === projectId);
+                return project ? project.color : '#e5e7eb';
+            };
+
+            const isSlotInDragRange = (slot) => {
+                if (!isDragging || !dragStart || !dragEnd) return false;
+                const slotIndex = TIME_SLOTS.indexOf(slot);
+                const startIndex = TIME_SLOTS.indexOf(dragStart);
+                const endIndex = TIME_SLOTS.indexOf(dragEnd);
+                const minIndex = Math.min(startIndex, endIndex);
+                const maxIndex = Math.max(startIndex, endIndex);
+                return slotIndex >= minIndex && slotIndex <= maxIndex;
+            };
+
+            const slotsPerRow = isZoomed ? 12 : 4;
+
+            // Copy table to clipboard in HTML format
+            const copyTableToClipboard = async () => {
+                if (!exportModalData) return;
+                
+                try {
+                    // Create HTML table with proper formatting
+                    let htmlTable = `<table border="1" style="border-collapse: collapse; width: 100%;">
+                        <thead>
+                            <tr style="background-color: #f3f4f6;">
+                                <th style="border: 1px solid #d1d5db; padding: 8px; text-align: left;">Date</th>
+                                <th style="border: 1px solid #d1d5db; padding: 8px; text-align: left;">Task</th>
+                                <th style="border: 1px solid #d1d5db; padding: 8px; text-align: left;">Notes</th>
+                                <th style="border: 1px solid #d1d5db; padding: 8px; text-align: left;">Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+                    
+                    exportModalData.rows.forEach((row, idx) => {
+                        const isLastRow = idx === exportModalData.rows.length - 1;
+                        const bgColor = isLastRow ? '#f9fafb' : '#ffffff';
+                        const fontWeight = isLastRow ? 'bold' : 'normal';
+                        
+                        htmlTable += `
+                            <tr style="background-color: ${bgColor}; font-weight: ${fontWeight};">
+                                <td style="border: 1px solid #d1d5db; padding: 8px;">${row.date.replace(/<br\/>/g, '\n').replace(/&nbsp;/g, ' ')}</td>
+                                <td style="border: 1px solid #d1d5db; padding: 8px;">${row.task}</td>
+                                <td style="border: 1px solid #d1d5db; padding: 8px;">${row.notes}</td>
+                                <td style="border: 1px solid #d1d5db; padding: 8px;">${row.duration}</td>
+                            </tr>`;
+                    });
+                    
+                    htmlTable += '</tbody></table>';
+                    
+                    // Create tab-separated text version as fallback
+                    let textTable = `${exportModalData.title}\n\n`;
+                    textTable += 'Date\tTask\tNotes\tDuration\n';
+                    exportModalData.rows.forEach(row => {
+                        const cleanDate = row.date.replace(/<br\/>/g, ' - ').replace(/&nbsp;/g, ' ');
+                        textTable += `${cleanDate}\t${row.task}\t${row.notes}\t${row.duration}\n`;
+                    });
+                    
+                    // Use the modern Clipboard API with both HTML and text
+                    const clipboardItem = new ClipboardItem({
+                        'text/html': new Blob([htmlTable], { type: 'text/html' }),
+                        'text/plain': new Blob([textTable], { type: 'text/plain' })
+                    });
+                    
+                    await navigator.clipboard.write([clipboardItem]);
+                    setCopyFeedback('Table copied to clipboard!');
+                    
+                    // Clear feedback after 3 seconds
+                    setTimeout(() => setCopyFeedback(''), 3000);
+                    
+                } catch (error) {
+                    console.error('Failed to copy table:', error);
+                    
+                    // Fallback: copy as plain text
+                    try {
+                        let textTable = `${exportModalData.title}\n\n`;
+                        textTable += 'Date\tTask\tNotes\tDuration\n';
+                        exportModalData.rows.forEach(row => {
+                            const cleanDate = row.date.replace(/<br\/>/g, ' - ').replace(/&nbsp;/g, ' ');
+                            textTable += `${cleanDate}\t${row.task}\t${row.notes}\t${row.duration}\n`;
+                        });
+                        
+                        await navigator.clipboard.writeText(textTable);
+                        setCopyFeedback('Table copied as text to clipboard!');
+                        setTimeout(() => setCopyFeedback(''), 3000);
+                    } catch (fallbackError) {
+                        setCopyFeedback('Failed to copy to clipboard');
+                        setTimeout(() => setCopyFeedback(''), 3000);
+                    }
+                }
+            };
+
+            // Helper functions for month view
+            const getMonthData = () => {
+                const [year, month] = selectedDate.split('-').slice(0, 2);
+                const firstDay = new Date(year, month - 1, 1);
+                const lastDay = new Date(year, month, 0);
+                const days = [];
+                
+                for (let d = new Date(firstDay); d <= lastDay; d.setDate(d.getDate() + 1)) {
+                    days.push(d.toISOString().split('T')[0]);
+                }
+                
+                return days;
+            };
+
+            const calculateDayStats = (date) => {
+                const entries = databaseService.getTimeEntriesForDate(date);
+                const projectTime = {};
+                let totalSlots = 0;
+                
+                Object.values(entries).forEach(projectId => {
+                    projectTime[projectId] = (projectTime[projectId] || 0) + 1;
+                    totalSlots++;
+                });
+                
+                const stats = Object.entries(projectTime).map(([projectId, slots]) => {
+                    const project = projects.find(p => p.id === projectId);
+                    return {
+                        projectId,
+                        projectName: project?.name || 'Unknown',
+                        color: project?.color || '#ccc',
+                        slots,
+                        hours: slots * 0.25,
+                        percentage: totalSlots > 0 ? (slots / totalSlots) * 100 : 0
+                    };
+                }).sort((a, b) => b.slots - a.slots);
+                
+                return {
+                    date,
+                    totalHours: totalSlots * 0.25,
+                    projects: stats
+                };
+            };
+
+            const calculateMonthStats = () => {
+                const days = getMonthData();
+                const projectTime = {};
+                let totalSlots = 0;
+                
+                days.forEach(date => {
+                    const entries = databaseService.getTimeEntriesForDate(date);
+                    Object.values(entries).forEach(projectId => {
+                        projectTime[projectId] = (projectTime[projectId] || 0) + 1;
+                        totalSlots++;
+                    });
+                });
+                
+                const stats = Object.entries(projectTime).map(([projectId, slots]) => {
+                    const project = projects.find(p => p.id === projectId);
+                    return {
+                        projectId,
+                        projectName: project?.name || 'Unknown',
+                        color: project?.color || '#ccc',
+                        slots,
+                        hours: slots * 0.25,
+                        percentage: totalSlots > 0 ? (slots / totalSlots) * 100 : 0
+                    };
+                }).sort((a, b) => b.slots - a.slots);
+                
+                return {
+                    totalHours: totalSlots * 0.25,
+                    projects: stats
+                };
+            };
+
+            // Helper function to format duration
+            const formatDuration = (hours) => {
+                const wholeHours = Math.floor(hours);
+                const minutes = Math.round((hours - wholeHours) * 60);
+                
+                if (wholeHours === 0) {
+                    return `${minutes} minutes`;
+                } else if (minutes === 0) {
+                    return `${wholeHours} hour${wholeHours !== 1 ? 's' : ''}`;
+                } else {
+                    return `${wholeHours} hour${wholeHours !== 1 ? 's' : ''} ${minutes} minutes`;
+                }
+            };
+
+            // Helper function to export project worksheet
+            const exportProjectWorksheet = (projectId, projectName) => {
+                const days = getMonthData();
+                const segments = [];
+                
+                // Create one segment per day with time entries
+                days.forEach(date => {
+                    const entries = databaseService.getTimeEntriesForDate(date);
+                    let daySlots = 0;
+                    
+                    // Count slots for this project on this date
+                    Object.entries(entries).forEach(([time, pid]) => {
+                        if (pid === projectId) {
+                            daySlots++;
+                        }
+                    });
+                    
+                    if (daySlots > 0) {
+                        segments.push({
+                            startDate: date,
+                            endDate: date,
+                            totalSlots: daySlots
+                        });
+                    }
+                });
+                
+                // Generate HTML table
+                const monthName = new Date(selectedDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+                const [year, month] = selectedDate.split('-');
+                const monthStart = new Date(year, month - 1, 1);
+                const monthEnd = new Date(year, month, 0);
+                
+                let totalHours = 0;
+                const rows = segments.map(segment => {
+                    const startDate = new Date(segment.startDate);
+                    const endDate = new Date(segment.endDate);
+                    const hours = segment.totalSlots * 0.25;
+                    totalHours += hours;
+                    
+                    let dateStr;
+                    if (segment.startDate === segment.endDate) {
+                        dateStr = startDate.toLocaleDateString('en-GB');
+                    } else {
+                        // For multi-day segments, show the date range
+                        dateStr = `${startDate.toLocaleDateString('en-GB')} -<br/>&nbsp;&nbsp;&nbsp;&nbsp;${endDate.toLocaleDateString('en-GB')}`;
+                    }
+                    
+                    return {
+                        date: dateStr,
+                        task: '',
+                        notes: '',
+                        duration: formatDuration(hours)
+                    };
+                });
+                
+                // Add total row
+                rows.push({
+                    date: `${monthStart.toLocaleDateString('en-GB')} -<br/>&nbsp;&nbsp;&nbsp;&nbsp;${monthEnd.toLocaleDateString('en-GB')}`,
+                    task: `Total billable hours ${monthName}`,
+                    notes: '',
+                    duration: formatDuration(totalHours)
+                });
+                
+                setExportModalData({
+                    title: `${monthName} Worksheet - ${projectName}`,
+                    rows: rows
+                });
+            };
+
+            const MonthView = () => {
+                const days = getMonthData();
+                const monthStats = calculateMonthStats();
+                const selectedDayStats = selectedDayInMonth ? calculateDayStats(selectedDayInMonth) : null;
+                
+                // Calculate max hours for scaling bars
+                const maxHours = Math.max(...days.map(date => {
+                    const stats = calculateDayStats(date);
+                    return stats.totalHours;
+                }), 1);
+                
+                return (
+                    <div className="flex gap-6">
+                        {/* Month Chart */}
+                        <div className="flex-1 bg-white rounded-lg shadow p-4">
+                            <h3 className="text-lg font-semibold mb-4">
+                                {new Date(selectedDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
+                            </h3>
+                            <div className="grid grid-cols-7 gap-2">
+                                {days.map(date => {
+                                    const stats = calculateDayStats(date);
+                                    const dayNum = new Date(date).getDate();
+                                    const isSelected = date === selectedDayInMonth;
+                                    
+                                    return (
+                                        <div
+                                            key={date}
+                                            className={`cursor-pointer border-2 rounded p-2 ${
+                                                isSelected ? 'border-blue-500' : 'border-gray-200'
+                                            } hover:border-gray-400`}
+                                            onClick={() => setSelectedDayInMonth(date)}
+                                        >
+                                            <div className="text-xs text-gray-600 mb-1">{dayNum}</div>
+                                            <div className="h-20 flex flex-col-reverse">
+                                                {stats.projects.map((project, idx) => (
+                                                    <div
+                                                        key={idx}
+                                                        className="w-full"
+                                                        style={{
+                                                            backgroundColor: project.color,
+                                                            height: `${(project.hours / maxHours) * 100}%`
+                                                        }}
+                                                        title={`${project.projectName}: ${project.hours}h`}
+                                                    />
+                                                ))}
+                                            </div>
+                                            <div className="text-xs text-gray-500 mt-1">
+                                                {stats.totalHours > 0 ? `${stats.totalHours}h` : '-'}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        
+                        {/* Summary Panels */}
+                        <div className="w-80 space-y-4">
+                            {/* Month Summary */}
+                            <div className="bg-white rounded-lg shadow p-4">
+                                <h3 className="text-lg font-semibold mb-3">Month Summary</h3>
+                                <div className="text-sm text-gray-600 mb-2">
+                                    Total: {monthStats.totalHours.toFixed(2)} hours
+                                </div>
+                                <div className="space-y-2">
+                                    {monthStats.projects.map(project => (
+                                        <div key={project.projectId} className="flex items-center justify-between">
+                                            <div className="flex items-center gap-2">
+                                                <div
+                                                    className="w-3 h-3 rounded"
+                                                    style={{ backgroundColor: project.color }}
+                                                />
+                                                <span className="text-sm">{project.projectName}</span>
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <div className="text-sm text-gray-600">
+                                                    {project.hours.toFixed(2)}h ({project.percentage.toFixed(1)}%)
+                                                </div>
+                                                <button
+                                                    onClick={() => exportProjectWorksheet(project.projectId, project.projectName)}
+                                                    className="p-1 hover:bg-gray-200 rounded"
+                                                    title="Export worksheet"
+                                                >
+                                                    <span dangerouslySetInnerHTML={{__html: feather.icons['download'].toSvg({width: 14, height: 14})}} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                            
+                            {/* Day Summary */}
+                            {selectedDayStats && (
+                                <div className="bg-white rounded-lg shadow p-4">
+                                    <h3 className="text-lg font-semibold mb-3">
+                                        Day Summary - {new Date(selectedDayStats.date).toLocaleDateString()}
+                                    </h3>
+                                    <div className="text-sm text-gray-600 mb-2">
+                                        Total: {selectedDayStats.totalHours.toFixed(2)} hours
+                                    </div>
+                                    <div className="space-y-2">
+                                        {selectedDayStats.projects.map(project => (
+                                            <div key={project.projectId} className="flex items-center justify-between">
+                                                <div className="flex items-center gap-2">
+                                                    <div
+                                                        className="w-3 h-3 rounded"
+                                                        style={{ backgroundColor: project.color }}
+                                                    />
+                                                    <span className="text-sm">{project.projectName}</span>
+                                                </div>
+                                                <div className="text-sm text-gray-600">
+                                                    {project.hours.toFixed(2)}h ({project.percentage.toFixed(1)}%)
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="min-h-screen bg-gray-50" onMouseUp={handleMouseUp}>
+                    {/* Header */}
+                    <div className="bg-white shadow-sm border-b">
+                        <div className="max-w-7xl mx-auto px-4 py-4">
+                            <div className="flex items-center justify-between">
+                                <h1 className="text-2xl font-bold text-gray-800">Timesheet (Local Storage)</h1>
+                                <div className="flex items-center gap-4">
+                                    <button
+                                        onClick={handleExport}
+                                        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                    >
+                                        Export
+                                    </button>
+                                    <button
+                                        onClick={() => fileInputRef.current.click()}
+                                        className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600"
+                                    >
+                                        Import
+                                    </button>
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept=".json"
+                                        className="hidden"
+                                        onChange={() => setShowImportModal(true)}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Date Navigation */}
+                    <div className="bg-white shadow-sm border-b">
+                        <div className="max-w-7xl mx-auto px-4 py-3">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-4">
+                                    {viewMode === 'day' ? (
+                                        <>
+                                            <button
+                                                onClick={() => handleDateChange(-1)}
+                                                className="p-2 hover:bg-gray-100 rounded"
+                                            >
+                                                <span dangerouslySetInnerHTML={{__html: feather.icons['chevron-left'].toSvg()}} />
+                                            </button>
+                                            <input
+                                                type="date"
+                                                value={selectedDate}
+                                                onChange={(e) => setSelectedDate(e.target.value)}
+                                                className="px-4 py-2 border rounded"
+                                            />
+                                            <button
+                                                onClick={() => handleDateChange(1)}
+                                                className="p-2 hover:bg-gray-100 rounded"
+                                            >
+                                                <span dangerouslySetInnerHTML={{__html: feather.icons['chevron-right'].toSvg()}} />
+                                            </button>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <button
+                                                onClick={() => {
+                                                    const date = new Date(selectedDate);
+                                                    date.setMonth(date.getMonth() - 1);
+                                                    setSelectedDate(date.toISOString().split('T')[0]);
+                                                }}
+                                                className="p-2 hover:bg-gray-100 rounded"
+                                            >
+                                                <span dangerouslySetInnerHTML={{__html: feather.icons['chevron-left'].toSvg()}} />
+                                            </button>
+                                            <input
+                                                type="month"
+                                                value={selectedDate.substring(0, 7)}
+                                                onChange={(e) => setSelectedDate(e.target.value + '-01')}
+                                                className="px-4 py-2 border rounded"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    const date = new Date(selectedDate);
+                                                    date.setMonth(date.getMonth() + 1);
+                                                    setSelectedDate(date.toISOString().split('T')[0]);
+                                                }}
+                                                className="p-2 hover:bg-gray-100 rounded"
+                                            >
+                                                <span dangerouslySetInnerHTML={{__html: feather.icons['chevron-right'].toSvg()}} />
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setViewMode(viewMode === 'day' ? 'month' : 'day')}
+                                        className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+                                    >
+                                        {viewMode === 'day' ? 'Month View' : 'Day View'}
+                                    </button>
+                                    {viewMode === 'day' && (
+                                        <button
+                                            onClick={() => setIsZoomed(!isZoomed)}
+                                            className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+                                        >
+                                            {isZoomed ? 'Normal View' : 'Zoom In'}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="max-w-7xl mx-auto px-4 py-6">
+                        {viewMode === 'day' ? (
+                            <div className="flex gap-6">
+                                {/* Projects Sidebar */}
+                                <div className="w-64 bg-white rounded-lg shadow p-4">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h2 className="text-lg font-semibold">Projects</h2>
+                                    <button
+                                        onClick={handleCreateProject}
+                                        className="p-1 hover:bg-gray-100 rounded"
+                                    >
+                                        <span dangerouslySetInnerHTML={{__html: feather.icons['plus'].toSvg({width: 20, height: 20})}} />
+                                    </button>
+                                </div>
+                                <div className="space-y-2">
+                                    {projects.map(project => (
+                                        <div
+                                            key={project.id}
+                                            className={`project-item p-3 rounded flex items-center justify-between ${
+                                                selectedProject === project.id ? 'bg-gray-100' : ''
+                                            } ${!project.active ? 'opacity-50' : ''}`}
+                                            onClick={() => project.active && setSelectedProject(project.id)}
+                                        >
+                                            <div className="flex items-center gap-2">
+                                                <div
+                                                    className="w-4 h-4 rounded"
+                                                    style={{ backgroundColor: project.color }}
+                                                />
+                                                <span className={!project.active ? 'line-through' : ''}>
+                                                    {project.name}
+                                                </span>
+                                            </div>
+                                            <div className="flex items-center gap-1">
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        const newName = prompt('Edit project name:', project.name);
+                                                        if (newName && newName !== project.name) {
+                                                            handleUpdateProject(project.id, { name: newName });
+                                                        }
+                                                    }}
+                                                    className="p-1 hover:bg-gray-200 rounded"
+                                                >
+                                                    <span dangerouslySetInnerHTML={{__html: feather.icons['edit-2'].toSvg({width: 16, height: 16})}} />
+                                                </button>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleUpdateProject(project.id, { active: !project.active });
+                                                    }}
+                                                    className="p-1 hover:bg-gray-200 rounded"
+                                                >
+                                                    <span dangerouslySetInnerHTML={{__html: feather.icons[project.active ? 'eye-off' : 'eye'].toSvg({width: 16, height: 16})}} />
+                                                </button>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleDeleteProject(project.id);
+                                                    }}
+                                                    className="p-1 hover:bg-gray-200 rounded text-red-500"
+                                                >
+                                                    <span dangerouslySetInnerHTML={{__html: feather.icons['trash-2'].toSvg({width: 16, height: 16})}} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Time Grid */}
+                            <div className="flex-1 bg-white rounded-lg shadow p-4">
+                                <div className="grid gap-2">
+                                    {TIME_SLOTS.reduce((rows, slot, index) => {
+                                        if (index % slotsPerRow === 0) {
+                                            rows.push([]);
+                                        }
+                                        rows[rows.length - 1].push(slot);
+                                        return rows;
+                                    }, []).map((row, rowIndex) => (
+                                        <div key={rowIndex} className="grid grid-cols-4 gap-2">
+                                            {row.map(slot => (
+                                                <div
+                                                    key={slot}
+                                                    className={`time-slot p-3 rounded text-center ${
+                                                        timeEntries[slot] || isSlotInDragRange(slot) ? '' : 'bg-gray-100'
+                                                    }`}
+                                                    style={{
+                                                        backgroundColor: timeEntries[slot] 
+                                                            ? getProjectColor(timeEntries[slot])
+                                                            : isSlotInDragRange(slot) 
+                                                                ? getProjectColor(selectedProject) + '80'
+                                                                : undefined
+                                                    }}
+                                                    onClick={() => handleTimeSlotClick(slot)}
+                                                    onMouseDown={() => handleMouseDown(slot)}
+                                                    onMouseEnter={() => handleMouseEnter(slot)}
+                                                >
+                                                    {slot}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                        ) : (
+                            <MonthView />
+                        )}
+                    </div>
+
+                    {/* Import Modal */}
+                    {showImportModal && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center">
+                            <div className="bg-white rounded-lg p-6 max-w-md w-full">
+                                <h3 className="text-lg font-semibold mb-4">Import Options</h3>
+                                <div className="space-y-4">
+                                    <button
+                                        onClick={() => handleImport('merge')}
+                                        className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                                    >
+                                        Merge with existing data
+                                    </button>
+                                    <button
+                                        onClick={() => handleImport('overwrite')}
+                                        className="w-full px-4 py-2 bg-orange-500 text-white rounded hover:bg-orange-600"
+                                    >
+                                        Overwrite existing data
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowImportModal(false);
+                                            fileInputRef.current.value = '';
+                                        }}
+                                        className="w-full px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Export Modal */}
+                    {exportModalData && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-auto">
+                                <div className="flex items-center justify-between mb-4">
+                                    <h3 className="text-lg font-semibold">{exportModalData.title}</h3>
+                                    <button
+                                        onClick={() => setExportModalData(null)}
+                                        className="p-1 hover:bg-gray-100 rounded"
+                                    >
+                                        <span dangerouslySetInnerHTML={{__html: feather.icons['x'].toSvg()}} />
+                                    </button>
+                                </div>
+                                <div className="mb-4 flex items-center justify-between">
+                                    <div className="text-sm text-gray-600">
+                                        Select and copy the table below to paste into Word or other applications
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {copyFeedback && (
+                                            <span className="text-sm text-green-600">{copyFeedback}</span>
+                                        )}
+                                        <button
+                                            onClick={copyTableToClipboard}
+                                            className="px-3 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 text-sm"
+                                        >
+                                            Copy Table
+                                        </button>
+                                    </div>
+                                </div>
+                                <table className="w-full border-collapse border border-gray-300">
+                                    <thead>
+                                        <tr className="bg-gray-100">
+                                            <th className="border border-gray-300 px-4 py-2 text-left">Date</th>
+                                            <th className="border border-gray-300 px-4 py-2 text-left">Task</th>
+                                            <th className="border border-gray-300 px-4 py-2 text-left">Notes</th>
+                                            <th className="border border-gray-300 px-4 py-2 text-left">Duration</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {exportModalData.rows.map((row, idx) => (
+                                            <tr key={idx} className={idx === exportModalData.rows.length - 1 ? 'font-semibold bg-gray-50' : ''}>
+                                                <td className="border border-gray-300 px-4 py-2" dangerouslySetInnerHTML={{__html: row.date}}></td>
+                                                <td className="border border-gray-300 px-4 py-2">{row.task}</td>
+                                                <td className="border border-gray-300 px-4 py-2">{row.notes}</td>
+                                                <td className="border border-gray-300 px-4 py-2">{row.duration}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                <div className="mt-4 flex justify-end">
+                                    <button
+                                        onClick={() => setExportModalData(null)}
+                                        className="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+                                    >
+                                        Close
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Render the app
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
